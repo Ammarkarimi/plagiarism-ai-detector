@@ -27,7 +27,9 @@ class SentenceTransformerEncoder:
 
         self.model = SentenceTransformer(model_name, device=resolve_device(device))
         self.name = model_name
-        self.dim = self.model.get_sentence_embedding_dimension()
+        # sentence-transformers 6 renamed get_sentence_embedding_dimension.
+        get_dim = getattr(self.model, "get_embedding_dimension", None) or self.model.get_sentence_embedding_dimension
+        self.dim = get_dim()
         self.batch_size = batch_size
         # E5 models expect a "query: " prefix for symmetric similarity.
         self.prefix = "query: " if "e5" in model_name.lower() else ""

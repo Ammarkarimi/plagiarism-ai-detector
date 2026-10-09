@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end pipeline check on a tiny slice of real data (CPU, about 15 minutes).
+# End-to-end pipeline check on a tiny slice of real data (CPU, about 30 minutes; Binoculars is the slow step).
 # Validates data loading, training, ensembling, the plagiarism engine and the API.
 # The resulting accuracy is NOT representative of a full training run.
 set -euo pipefail

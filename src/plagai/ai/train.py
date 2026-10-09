@@ -37,14 +37,12 @@ log = logging.getLogger(__name__)
 
 
 class TextDataset(torch.utils.data.Dataset):
-    def __init__(self, rows: list[dict], tokenizer, max_length: int, train: bool,
-                 augment_p: float = 0.0, seed: int = 0):
+    def __init__(self, rows: list[dict], tokenizer, max_length: int, train: bool, augment_p: float = 0.0):
         self.rows = rows
         self.tok = tokenizer
         self.max_length = max_length
         self.train = train
         self.augment_p = augment_p
-        self.rng = random.Random(seed)
         # About 1.3 tokens per English word; crop so most windows fit without truncation.
         self.crop_words = int(max_length / 1.35)
 
@@ -55,8 +53,11 @@ class TextDataset(torch.utils.data.Dataset):
         r = self.rows[i]
         text = r["text"]
         if self.train:
-            text = random_crop(text, self.rng, self.crop_words)
-            text = augment(text, self.rng, self.augment_p)
+            # DataLoader re-seeds the global `random` per worker, so draw from it instead of
+            # a shared instance (which every worker would copy with identical state).
+            rng = random.Random(random.getrandbits(64))
+            text = random_crop(text, rng, self.crop_words)
+            text = augment(text, rng, self.augment_p)
         enc = self.tok(text, truncation=True, max_length=self.max_length)
         enc["labels"] = int(r["label"])
         return enc
@@ -107,11 +108,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--report-to", default="none", help="none | wandb | tensorboard")
     p.add_argument("--skip-final-eval", action="store_true")
+    p.add_argument("--eval-only", action="store_true", help="evaluate the model already saved in --out")
     a = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     set_seed(a.seed)
     data = Path(a.data)
+    if not a.eval_only:
+        train(a, data)
+    if not a.skip_final_eval:
+        final_eval(a, data)
+
+
+def train(a: argparse.Namespace, data: Path) -> None:
     train_rows = read_jsonl(data / "train.jsonl", a.max_train)
     val_rows = read_jsonl(data / "val.jsonl", a.max_eval)
     log.info("train=%d val=%d", len(train_rows), len(val_rows))
@@ -122,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
     if a.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
-    train_ds = TextDataset(train_rows, tok, a.max_length, train=True, augment_p=a.augment_p, seed=a.seed)
+    train_ds = TextDataset(train_rows, tok, a.max_length, train=True, augment_p=a.augment_p)
     val_ds = TextDataset(val_rows, tok, a.max_length, train=False)
 
     out = Path(a.out)
@@ -173,8 +182,9 @@ def main(argv: list[str] | None = None) -> None:
     (out / "train_meta.json").write_text(json.dumps(meta, indent=2))
     log.info("saved model to %s", out)
 
-    if a.skip_final_eval:
-        return
+
+def final_eval(a: argparse.Namespace, data: Path) -> None:
+    out = Path(a.out)
     report = {}
     for split in ("test", "test_ood"):
         path = data / f"{split}.jsonl"

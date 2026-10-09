@@ -25,10 +25,25 @@ class TransformerClassifier:
         self.max_windows = max_windows
         label2id = {k.lower(): v for k, v in (self.model.config.label2id or {}).items()}
         self.ai_index = label2id.get("ai", 1)
+        self.prefix, self.suffix = self._special_tokens()
+        self.pad_id = self.tokenizer.pad_token_id or 0
+
+    def _special_tokens(self) -> tuple[list[int], list[int]]:
+        """Find the special tokens the tokenizer wraps around a single sequence (e.g. [CLS] ... [SEP]).
+
+        Works across tokenizer families and transformers versions, unlike
+        ``build_inputs_with_special_tokens``, which transformers 5 removed.
+        """
+        plain = self.tokenizer("hello", add_special_tokens=False)["input_ids"]
+        full = self.tokenizer("hello")["input_ids"]
+        for i in range(len(full) - len(plain) + 1):
+            if full[i:i + len(plain)] == plain:
+                return full[:i], full[i + len(plain):]
+        return [], []
 
     def _windows(self, text: str) -> list[list[int]]:
         ids = self.tokenizer(text, add_special_tokens=False)["input_ids"]
-        size = self.max_length - self.tokenizer.num_special_tokens_to_add()
+        size = self.max_length - len(self.prefix) - len(self.suffix)
         if len(ids) <= size:
             return [ids]
         stride = int(size * 0.75)
@@ -43,10 +58,14 @@ class TransformerClassifier:
     def _logits(self, windows: list[list[int]]) -> np.ndarray:
         out = []
         for i in range(0, len(windows), self.batch_size):
-            batch = [{"input_ids": self.tokenizer.build_inputs_with_special_tokens(w)}
-                     for w in windows[i:i + self.batch_size]]
-            enc = self.tokenizer.pad(batch, return_tensors="pt").to(self.device)
-            logits = self.model(**enc).logits.float()
+            seqs = [self.prefix + w + self.suffix for w in windows[i:i + self.batch_size]]
+            width = max(map(len, seqs))
+            ids = torch.full((len(seqs), width), self.pad_id, dtype=torch.long)
+            mask = torch.zeros((len(seqs), width), dtype=torch.long)
+            for r, seq in enumerate(seqs):  # right padding
+                ids[r, :len(seq)] = torch.tensor(seq)
+                mask[r, :len(seq)] = 1
+            logits = self.model(input_ids=ids.to(self.device), attention_mask=mask.to(self.device)).logits.float()
             # Log-odds of the AI class, valid for 2-class softmax heads.
             out.append((logits[:, self.ai_index] - logits[:, 1 - self.ai_index]).cpu().numpy())
         return np.concatenate(out) if out else np.zeros(0)
