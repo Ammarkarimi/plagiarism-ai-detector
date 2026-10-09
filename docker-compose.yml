@@ -1,0 +1,18 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      PLAGAI_DATABASE_URL: postgresql+psycopg://plagai:plagai@db:5432/plagai
+      PLAGAI_ADMIN_TOKEN: ${PLAGAI_ADMIN_TOKEN:?set PLAGAI_ADMIN_TOKEN}
+      PLAGAI_BRAVE_API_KEY: ${PLAGAI_BRAVE_API_KEY:-}
+    volumes:
+      - ./artifacts/ai-detector:/models/ai-detector:ro   # output of `plagai train-ai` + `plagai fit-ensemble`
+      - corpus:/data/corpus
+      - hf-cache:/models/hf
+    depends_on: [db]
+  db:
+    image: postgres:16
+    environment: {POSTGRES_USER: plagai, POSTGRES_PASSWORD: plagai, POSTGRES_DB: plagai}
+    volumes: [pgdata:/var/lib/postgresql/data]
+volumes: {corpus: {}, hf-cache: {}, pgdata: {}}

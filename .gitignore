@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+/data/
+/models/
+/runs/
+/artifacts/
+*.db
+*.sqlite
+.env
+wandb/
