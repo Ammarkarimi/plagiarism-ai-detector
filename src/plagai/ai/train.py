@@ -21,7 +21,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import random
+import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +64,33 @@ class TextDataset(torch.utils.data.Dataset):
         enc = self.tok(text, truncation=True, max_length=self.max_length)
         enc["labels"] = int(r["label"])
         return enc
+
+
+def resolve_precision(bf16: bool, fp16: bool) -> tuple[bool, bool]:
+    """Return (bf16, fp16) flags the current hardware can actually run."""
+    if not (bf16 or fp16):
+        return False, False
+    if not torch.cuda.is_available():
+        log.warning("No CUDA GPU visible to PyTorch (build %s); training in fp32 on CPU. "
+                    "If you have an NVIDIA GPU, install the CUDA build of torch.", torch.__version__)
+        return False, False
+    if bf16 and torch.cuda.is_bf16_supported():
+        return True, False
+    if bf16:
+        log.warning("GPU %s has no bf16 support; using fp16 instead.", torch.cuda.get_device_name(0))
+    return False, True
+
+
+def check_disk(out: Path, model, save_optimizer: bool) -> None:
+    """Fail fast if the checkpoints (best + latest + final model) can't fit on disk."""
+    model_gb = sum(p.numel() for p in model.parameters()) * 4 / 1e9
+    need_gb = model_gb * (3 if save_optimizer else 1) * 2 + model_gb + 0.5
+    out.mkdir(parents=True, exist_ok=True)
+    free_gb = shutil.disk_usage(out).free / 1e9
+    log.info("disk: %.1f GB free, about %.1f GB needed for checkpoints", free_gb, need_gb)
+    if free_gb < need_gb:
+        raise SystemExit(f"Not enough disk space in {out}: {free_gb:.1f} GB free, need about {need_gb:.1f} GB. "
+                         "Free some space or pass --out on another drive.")
 
 
 def compute_metrics(eval_pred) -> dict:
@@ -105,14 +135,24 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--bf16", action="store_true")
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--gradient-checkpointing", action="store_true")
+    p.add_argument("--num-workers", type=int, default=0 if sys.platform == "win32" else 2,
+                   help="DataLoader workers (default 0 on Windows, where worker spawn is slow)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--report-to", default="none", help="none | wandb | tensorboard")
     p.add_argument("--skip-final-eval", action="store_true")
+    p.add_argument("--save-optimizer", action="store_true",
+                   help="also checkpoint optimizer state (needed only to resume; about 3x the disk)")
+    p.add_argument("--keep-checkpoints", action="store_true",
+                   help="keep intermediate checkpoints after training (the final model is saved separately)")
     p.add_argument("--eval-only", action="store_true", help="evaluate the model already saved in --out")
     a = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     set_seed(a.seed)
+    a.bf16, a.fp16 = resolve_precision(a.bf16, a.fp16)
+    device = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    log.info("device=%s bf16=%s fp16=%s", device, a.bf16, a.fp16)
     data = Path(a.data)
     if not a.eval_only:
         train(a, data)
@@ -126,8 +166,11 @@ def train(a: argparse.Namespace, data: Path) -> None:
     log.info("train=%d val=%d", len(train_rows), len(val_rows))
 
     tok = AutoTokenizer.from_pretrained(a.model)
+    # Keep fp32 master weights: transformers 5 otherwise loads the checkpoint's dtype (fp16 for
+    # deberta-v3-base), and AdamW on fp16 weights diverges. --bf16/--fp16 add autocast on top.
     model = AutoModelForSequenceClassification.from_pretrained(
-        a.model, num_labels=2, id2label={0: "human", 1: "ai"}, label2id={"human": 0, "ai": 1})
+        a.model, num_labels=2, id2label={0: "human", 1: "ai"}, label2id={"human": 0, "ai": 1},
+        dtype=torch.float32)
     if a.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
@@ -135,6 +178,7 @@ def train(a: argparse.Namespace, data: Path) -> None:
     val_ds = TextDataset(val_rows, tok, a.max_length, train=False)
 
     out = Path(a.out)
+    check_disk(out, model, a.save_optimizer)
     steps_per_epoch = max(1, len(train_ds) // (a.batch_size * a.grad_accum))
     eval_steps = min(a.eval_steps, steps_per_epoch)
     warmup_steps = int(a.warmup_ratio * steps_per_epoch * a.epochs)  # warmup_ratio was removed in transformers 5
@@ -152,14 +196,15 @@ def train(a: argparse.Namespace, data: Path) -> None:
         eval_steps=eval_steps,
         save_strategy="steps",
         save_steps=eval_steps,
-        save_total_limit=2,
+        save_total_limit=1,             # the best checkpoint is always kept in addition
+        save_only_model=not a.save_optimizer,
         load_best_model_at_end=True,
         metric_for_best_model="auroc",
         greater_is_better=True,
         logging_steps=max(1, eval_steps // 10),
         bf16=a.bf16,
         fp16=a.fp16,
-        dataloader_num_workers=2,
+        dataloader_num_workers=a.num_workers,
         report_to=[] if a.report_to == "none" else [a.report_to],
         seed=a.seed,
     )
@@ -180,6 +225,8 @@ def train(a: argparse.Namespace, data: Path) -> None:
             "augment_p": a.augment_p, "epochs": a.epochs, "lr": a.lr,
             "val_metrics": trainer.evaluate()}
     (out / "train_meta.json").write_text(json.dumps(meta, indent=2))
+    if not a.keep_checkpoints:
+        shutil.rmtree(out / "checkpoints", ignore_errors=True)
     log.info("saved model to %s", out)
 
 

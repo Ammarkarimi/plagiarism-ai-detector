@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  {'serve':<18} Run the HTTP API (uvicorn)")
         return
     cmd, rest = argv[0], argv[1:]
+    import logging
+    for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3", "fsspec"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     if cmd == "admin":
         return _admin(rest)
     if cmd == "serve":

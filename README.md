@@ -38,7 +38,7 @@ src/plagai/
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cpu   # or the CUDA build
+pip install torch --index-url https://download.pytorch.org/whl/cu130  # NVIDIA GPU (driver 580+); /whl/cu126 for older drivers, /whl/cpu for no GPU
 pip install -e ".[dev]"
 pytest                                   # 23 tests, no downloads needed
 ```
@@ -55,9 +55,24 @@ plagai prepare-ai-data --out data/ai --sources hc3 mage raid wiki ai_pile \
 plagai train-ai --data data/ai --model microsoft/deberta-v3-base --out artifacts/ai-detector \
     --epochs 2 --batch-size 16 --max-length 512 --lr 2e-5 --bf16
 
+#     6-8 GB GPU (e.g. RTX 3050/3060 laptop): same effective batch, about 4.2 GB VRAM,
+#     about 9-10 h for 110k texts x 2 epochs
+plagai train-ai --data data/ai --model microsoft/deberta-v3-base --out artifacts/ai-detector \
+    --epochs 2 --batch-size 4 --grad-accum 4 --gradient-checkpointing --max-length 512 --lr 2e-5 --bf16 \
+    --max-eval 3000
+
 # 1c. Fit the stacker and calibrate thresholds (1% FPR on human text by default)
 plagai fit-ensemble --model-dir artifacts/ai-detector --data data/ai            # add --binoculars for zero-shot features
 ```
+
+Training notes:
+* `--bf16`/`--fp16` fall back to what your hardware supports. If the log says `device=cpu`, you
+  have the CPU build of torch; reinstall it from the CUDA index above.
+* Before training, the script checks there's enough free disk for checkpoints. Afterwards it deletes
+  the checkpoints; the final model (about 0.7 GB) is in `--out`. Pass `--keep-checkpoints` or
+  `--save-optimizer` if you need to resume.
+* Stylometric features are opt-in (`fit-ensemble --stylometry`). In our tests they lowered
+  accuracy on unseen sources.
 
 Outputs in `artifacts/ai-detector/`:
 * `classifier_metrics.json`: AUROC and TPR@1%FPR per source, generator and attack

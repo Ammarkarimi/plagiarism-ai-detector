@@ -16,10 +16,11 @@ class TransformerClassifier:
                  batch_size: int = 16, max_windows: int = 16):
         self.device = resolve_device(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_dir, dtype=torch.float32)
         self.model.eval().to(self.device)
         if self.device == "cuda":
-            self.model.half()
+            # DeBERTa can overflow in fp16; prefer bf16 where the GPU supports it.
+            self.model.to(torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
         self.max_length = min(max_length, getattr(self.tokenizer, "model_max_length", max_length) or max_length)
         self.batch_size = batch_size
         self.max_windows = max_windows

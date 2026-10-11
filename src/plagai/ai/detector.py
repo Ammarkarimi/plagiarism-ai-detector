@@ -31,7 +31,9 @@ class AIDetector:
             cfg = self.ensemble.meta["binoculars"]
             obs, perf = binoculars_models or (cfg["observer"], cfg["performer"])
             bino = Binoculars(obs, perf, device=device)
-        self.features = FeatureBuilder(self.classifier, bino)
+        from plagai.ai.stylometry import FEATURE_NAMES
+        use_stylo = self.ensemble is None or FEATURE_NAMES[0] in self.ensemble.feature_names
+        self.features = FeatureBuilder(self.classifier, bino, use_stylometry=use_stylo)
         if self.ensemble and self.ensemble.feature_names != self.features.names:
             raise ValueError(f"Ensemble expects {self.ensemble.feature_names}, got {self.features.names}")
         self.thresholds = self.ensemble.thresholds if self.ensemble else {"ai": 0.5, "human": 0.5}

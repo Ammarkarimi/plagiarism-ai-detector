@@ -12,7 +12,7 @@ fitted on the same rows that set them:
 
 Usage::
 
-    plagai fit-ensemble --model-dir artifacts/ai-detector --data data/ai [--binoculars]
+    plagai fit-ensemble --model-dir artifacts/ai-detector --data data/ai [--binoculars] [--stylometry]
 """
 
 from __future__ import annotations
@@ -117,6 +117,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--observer", default=None)
     p.add_argument("--performer", default=None)
     p.add_argument("--max-length", type=int, default=512)
+    p.add_argument("--stylometry", action="store_true",
+                   help="add stylometric features (off by default: in tests they hurt unseen-source accuracy)")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -132,7 +134,7 @@ def main(argv: list[str] | None = None) -> None:
         observer = a.observer or s.binoculars_observer
         performer = a.performer or s.binoculars_performer
         bino = Binoculars(observer, performer)
-    fb = FeatureBuilder(clf, bino)
+    fb = FeatureBuilder(clf, bino, use_stylometry=a.stylometry)
 
     data = Path(a.data)
     val = read_jsonl(data / "val.jsonl", a.max_rows)
